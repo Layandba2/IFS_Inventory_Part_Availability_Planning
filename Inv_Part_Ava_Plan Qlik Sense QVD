@@ -1,0 +1,158 @@
+[InventoryPartAvailabilityMain]:
+LOAD  IPA_ORDER_NO,
+	  IPA_RELEASE_NO,
+      IPA_PART_NO,
+      IPA_TYPE,
+      IPA_QTY_DEMAND,
+      IPA_DUE_DATE,
+      IPA_ONHAND_QTY,
+      IPA_PROJECTED_QTY;
+      
+      
+
+select distinct 		d.order_no as IPA_ORDER_NO,
+                        d.release_no as IPA_RELEASE_NO,
+                        d.part_no as IPA_PART_NO,
+                        d.type as IPA_TYPE,
+                        d.qty_demand as IPA_QTY_DEMAND,
+                        d.due_date as IPA_DUE_DATE ,
+                        d.onhand_qty as IPA_ONHAND_QTY,
+                        d.projected_qty as IPA_PROJECTED_QTY
+
+from 
+(select b.order_no,b.release_no,b.part_no , b.type ,b.qty_demand ,b.due_date,
+            nvl(c.onhand_qty,0) as onhand_qty,
+            nvl(c.onhand_qty,0) + SUM(
+                CASE
+                    WHEN (b.type = 'Purchase Order' or b.type='Arrived Purchase Order')
+                          THEN
+                        b.qty_demand
+                    ELSE
+                        - b.qty_demand
+                END
+            )
+                           OVER( PARTITION BY b.part_no
+            ORDER BY
+                ROWNUM ASC
+                           ) AS projected_qty
+from
+        (select a.order_no,a.release_no,a.part_no,a.type,a.qty_demand,a.due_date from
+                        (
+                        select order_no as order_no,release_no as release_no,part_no as part_no,'Shop Order' as type,
+                         case when (qty_issued >= qty_required) then  0
+                         when (qty_issued < qty_required) then (qty_required - qty_issued)
+                         end as qty_demand,date_required as due_date
+                        from shop_material_alloc_uiv
+                        where contract ='DSI1' and state <> 'Cancelled' and state <> 'Closed'
+                         
+                        union all
+                        
+                        select  p.order_no as order_no,p.line_no as release_no,p.part_no as part_no,'Purchase Order' as type,
+                          case when count(r.part_no) > 0 then sum(r.buy_qty_due-r.qty_arrived) * sum(p.conv_factor)   else sum(p.buy_qty_due) * sum(p.conv_factor)  end 
+                          as qty_demand,p.planned_receipt_date as due_date
+                        from   purchase_order_line_all p left join purchase_receipt_stat_uiv r on r.order_no=p.order_no and r.part_no=p.part_no
+                         where  p.state <> 'Cancelled' and p.state <> 'Closed' 
+                        group by p.order_no,p.line_no,p.part_no,p.planned_receipt_date
+                        
+                        union all 
+                        
+                        select  p.order_no as order_no,p.line_no as release_no,p.part_no as part_no,'Arrived Purchase Order' as type,
+                          case when count(t.part_no) > 0 then sum(t.quantity) * sum(p.conv_factor)   else 0  end 
+                          as qty_demand,t.date_applied as due_date
+                        from   purchase_order_line_all p left join  inventory_transaction_hist2 t on t.source_ref1=p.order_no and t.part_no=p.part_no
+                        where p.state <> 'Cancelled' and p.state <> 'Closed' 
+                        group by p.order_no,p.line_no,p.part_no,t.date_applied
+                        ) a
+         where  a.part_no  like 'I%' or a.part_no like 'L%' or a.part_no like 'R%'
+        order by a.due_date,a.order_no asc) b
+        
+         LEFT JOIN 
+         (
+            SELECT
+            ohq.material                                               AS material,
+            ( ohq.qty_in_transit + 
+//              ohq.rm_stock +
+            ohq.wip + ohq.wip2 ) AS onhand_qty
+         FROM
+            (
+                SELECT
+                    inv.part_no AS material,
+                    nvl(SUM(inv.qty_in_transit),
+                        0)      AS qty_in_transit,
+                    SUM(
+                        CASE
+                            WHEN inv.location_type LIKE 'Picking%'
+                                 AND inv.location_no LIKE 'RM%' THEN
+                                inv.qty_onhand
+                            ELSE
+                                0
+                        END
+                    )           AS rm_stock,
+                    SUM(
+                        CASE
+                            WHEN inv.location_type LIKE 'Picking%'
+                                 AND(inv.location_no LIKE 'SP-%'
+                                     OR inv.location_no LIKE 'SS-ADM'
+                                     OR inv.location_no LIKE 'STA-MP'
+                                     OR inv.location_no LIKE 'STA-SP'
+                                     OR inv.location_no LIKE 'KP-SUBST'
+                                     OR inv.location_no LIKE 'MP-%') THEN
+                                inv.qty_onhand
+                            ELSE
+                                0
+                        END
+                    )           AS wip,
+                    SUM(
+                        CASE
+                            WHEN inv.location_type LIKE 'Production%' THEN
+                                inv.qty_onhand
+                            ELSE
+                                0
+                        END
+                    )           AS wip2
+                FROM
+                    inventory_part_in_stock_uiv inv
+                GROUP BY
+                    inv.part_no
+            ) ohq
+    ) c on c.material=b.part_no
+) d
+left join shop_material_alloc_uiv e
+on d.release_no=e.release_no
+
+;
+
+[InventoryPart]:
+LOAD  IPA_DESCRIPTION,
+	  IPA_PART_FAMILY,
+      IPA_PLANNER_BUYER,
+      IPA_UNIT_MEAS,
+      IPA_PART_NO;
+
+select 		description as IPA_DESCRIPTION,
+			part_product_family as IPA_PART_FAMILY,
+            planner_buyer as IPA_PLANNER_BUYER,
+            unit_meas as IPA_UNIT_MEAS,
+            part_no as IPA_PART_NO
+from Inv_Part_Config_Project_2
+where contract='DSI1';
+
+[PurchaseOrder]:
+
+[PurchaseOrder]:
+Load IPA_PO_NO,
+	 IPA_PART_NO,
+	 IPA_PPLANED_RECEIPT_DATE
+     ;
+
+
+SELECT order_no as IPA_PO_NO  ,part_no as IPA_PART_NO  ,planned_receipt_date as IPA_PPLANED_RECEIPT_DATE
+FROM (
+  SELECT 
+    order_no ,part_no ,planned_receipt_date ,
+    ROW_NUMBER() OVER (PARTITION BY part_no ORDER BY planned_receipt_date DESC) 
+    AS rn
+  FROM PURCHASE_ORDER_LINE_ALL 
+  
+) ranked
+WHERE rn = 1;
